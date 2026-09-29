@@ -66,10 +66,32 @@ export class VoiceCall {
     this.connectionStarted = false;
     this.abort = new AbortController();
     this.session = undefined;
+    const attempt = this.abort;
     let onReady: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const data = await request("/sessions", accessCode.trim(), "POST", this.abort.signal);
+      // Permission must be granted before a server session can spend credits.
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Microphone access is unavailable. Use HTTPS and a browser that supports microphone input.");
+      }
+      let microphone: MediaStream;
+      try {
+        microphone = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      } catch (error) {
+        if (attempt.signal.aborted) return;
+        const name = error instanceof Error ? error.name : "";
+        throw new Error(name === "NotAllowedError" || name === "SecurityError"
+          ? "Microphone permission is blocked. Allow microphone access in your browser's site settings, then try again. No call was started."
+          : name === "NotFoundError"
+          ? "No microphone was found. Connect a microphone and try again. No call was started."
+          : "Could not access your microphone. Check device permissions and whether another application is using it, then try again.");
+      }
+      const usable = microphone.getAudioTracks().some(track => track.readyState === "live");
+      // This is a permission check; the SDK owns its own stream after connect().
+      microphone.getTracks().forEach(track => track.stop());
+      if (attempt.signal.aborted || this.disposed) return;
+      if (!usable) throw new Error("No active microphone input is available. No call was started.");
+      const data = await request("/sessions", accessCode.trim(), "POST", attempt.signal);
       if (!data.id || !data.controlToken) {
         throw new Error("The bot returned invalid session details.");
       }

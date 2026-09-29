@@ -6,6 +6,8 @@ const sdk = vi.hoisted(() => ({
   trackStop: vi.fn(),
   disconnect: vi.fn(async () => {}),
   tracks: vi.fn(),
+  microphone: vi.fn(),
+  probeStop: vi.fn(),
 }));
 vi.mock("@pipecat-ai/small-webrtc-transport", () => ({ SmallWebRTCTransport: class {} }));
 vi.mock("@pipecat-ai/client-js", () => ({
@@ -29,6 +31,9 @@ function setup() {
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  const track = { readyState: "live", stop: sdk.probeStop };
+  sdk.microphone.mockReset().mockResolvedValue({ getAudioTracks: () => [track], getTracks: () => [track] });
+  vi.stubGlobal("navigator", { mediaDevices: { getUserMedia: sdk.microphone } });
   sdk.tracks.mockImplementation(() => ({ local: { audio: { stop: sdk.trackStop } } }));
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -223,4 +228,46 @@ it("disconnects even when the end request times out", async () => {
   expect(sdk.trackStop).toHaveBeenCalledOnce();
   expect(sdk.disconnect).toHaveBeenCalledOnce();
   expect(callbacks.onEnded.mock.calls[0][0]).toContain("cleanup could not be confirmed");
+});
+
+
+it("does not create a session when microphone permission is denied and allows retry", async () => {
+  sdk.microphone.mockRejectedValueOnce(new DOMException("Denied", "NotAllowedError"));
+  const fetchMock = vi.fn(async (url: string) => Response.json(url.endsWith("/sessions")
+    ? { id: "call", controlToken: "control" } : { status: "ended" }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { call, callbacks } = setup();
+  await call.start("demo");
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(callbacks.onReady).not.toHaveBeenCalled();
+  expect(callbacks.onEnded.mock.lastCall?.[0]).toContain("Microphone permission is blocked");
+  await call.start("demo");
+  expect(callbacks.onReady).toHaveBeenCalledOnce();
+  expect(sdk.probeStop).toHaveBeenCalledOnce();
+  await call.stop();
+});
+
+it("does not start a call after canceling a pending microphone prompt", async () => {
+  let grant!: (stream: unknown) => void;
+  sdk.microphone.mockReturnValueOnce(new Promise(resolve => { grant = resolve; }));
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
+  const { call } = setup();
+  const starting = call.start("demo");
+  await call.stop();
+  const track = { readyState: "live", stop: sdk.probeStop };
+  grant({ getAudioTracks: () => [track], getTracks: () => [track] });
+  await starting;
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(sdk.probeStop).toHaveBeenCalledOnce();
+});
+
+it("does not create a session when no microphone exists", async () => {
+  sdk.microphone.mockRejectedValueOnce(new DOMException("Missing", "NotFoundError"));
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
+  const { call, callbacks } = setup();
+  await call.start("demo");
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(callbacks.onEnded.mock.lastCall?.[0]).toContain("No microphone was found");
 });

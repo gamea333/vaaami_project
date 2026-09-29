@@ -153,10 +153,12 @@ ID are configurable through the bot environment.
 | Observability | Enabled; structured live Worker logs verified |
 | Repository and README | Source, workflow, architecture, setup, tradeoffs and improvements included |
 
-**Remaining acceptance checks:** a real spoken interruption; a fresh call confirming
-Completed after the deployed hangup fix; denied microphone and unavailable-bot UI;
-manual detail refresh/Back navigation; mobile-width layout; and dashboard log rehearsal.
-These are not claimed complete by automated tests.
+**Manual verification:** the project owner reports the other listed manual tests
+passed, including intentional hangup, interruptions, unavailable bot, navigation
+and narrow layout. Microphone denial exposed a startup issue: permission is now
+checked before session creation, with automated denial/retry/cancellation coverage.
+A fresh deployed-browser check of this correction remains pending. Dashboard log
+rehearsal remains part of assessment preparation.
 
 ## Run locally
 
@@ -374,7 +376,7 @@ From `bot/` in Ubuntu:
 uv run python -m pytest -q
 ```
 
-Current automated suite: **20 frontend, 13 Worker and 32 bot tests**. Coverage includes
+Current automated suite: **23 frontend, 13 Worker and 32 bot tests**. Coverage includes
 history loading/retry/404 states, stale requests, audio cleanup, intentional-hangup
 ordering, usage limits, upload validation, duplicate/conflicting saves and lost-response
 retries. Tests use fake providers; passing tests do not prove real audio or visual layout.
