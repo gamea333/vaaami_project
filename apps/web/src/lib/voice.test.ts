@@ -194,3 +194,33 @@ it("recovers a failed save after refresh and retries without opening microphone"
   expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/offer") || url.endsWith("/sessions"))).toBe(false);
   call.dispose();
 });
+
+it("stops the microphone immediately but waits for intentional hangup acknowledgement before disconnecting", async () => {
+  let acknowledge!: (response: Response) => void;
+  const pending = new Promise<Response>(resolve => { acknowledge = resolve; });
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => url.endsWith("/end") ? pending :
+    Response.json({ id: "call", controlToken: "control" })));
+  const { call } = setup();
+  await call.start("demo");
+  const stopping = call.stop();
+  // Let queued transport cleanup run if it was incorrectly started concurrently.
+  await Promise.resolve();
+  expect(sdk.trackStop).toHaveBeenCalledOnce();
+  expect(sdk.disconnect).not.toHaveBeenCalled();
+  acknowledge(Response.json({ status: "ended" }));
+  await stopping;
+  expect(sdk.disconnect).toHaveBeenCalledOnce();
+});
+
+it("disconnects even when the end request times out", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/end")) throw new DOMException("Request timed out", "TimeoutError");
+    return Response.json({ id: "call", controlToken: "control" });
+  }));
+  const { call, callbacks } = setup();
+  await call.start("demo");
+  await call.stop();
+  expect(sdk.trackStop).toHaveBeenCalledOnce();
+  expect(sdk.disconnect).toHaveBeenCalledOnce();
+  expect(callbacks.onEnded.mock.calls[0][0]).toContain("cleanup could not be confirmed");
+});

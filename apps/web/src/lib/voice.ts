@@ -131,17 +131,27 @@ export class VoiceCall {
     this.audio.srcObject = null;
     // An authentication failure happens before connect(). Some transports cannot
     // finish disconnect() before initialization, which would hide the actual error.
-    const cleanup: Promise<unknown>[] = this.connectionStarted
-      ? [Promise.resolve().then(() => this.client.disconnect())] : [];
+    const disconnect = this.connectionStarted;
     this.connectionStarted = false;
-    if (this.session) {
-      cleanup.push(request(`/sessions/${this.session.id}/end`, this.session.controlToken, "POST").then((data) => {
+    let cleanupFailed = false;
+    try {
+      // Let the server record intentional hangup before closing WebRTC. Otherwise
+      // its disconnect callback can win the race and persist the wrong reason.
+      if (this.session) {
+        const data = await request(`/sessions/${this.session.id}/end`, this.session.controlToken, "POST");
         if (data.transcript) this.publish(data);
         void this.followSave(data);
-      }));
+      }
+    } catch {
+      cleanupFailed = true;
+    } finally {
+      // The request has a timeout; always close transport even when it fails.
+      if (disconnect) {
+        try { await this.client.disconnect(); }
+        catch { cleanupFailed = true; }
+      }
     }
-    const results = await Promise.allSettled(cleanup);
-    if (results.some((result) => result.status === "rejected")) {
+    if (cleanupFailed) {
       message += " Server cleanup could not be confirmed; the session will expire automatically.";
       if (this.session) this.publish({ ...(this.lastSnapshot ?? { transcript: [], usage: { replies: 0, ttsCharactersReserved: 0 } }),
         saveStatus: "unknown", saveError: "Save status is unknown. Recover or retry the save when the bot is reachable.", canRetrySave: true });
