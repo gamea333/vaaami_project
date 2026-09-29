@@ -1,223 +1,439 @@
-# Vaami Mini Call Log Service
+# Vaami — Voice Agent & Call Log
 
-A browser voice agent with saved transcripts and latency samples. Built with React,
-Cloudflare Pages, Workers, D1 and a local Pipecat bot.
+Talk to an AI agent in your browser, end the call, and revisit its transcript and
+latency measurements. This project implements the Vaami intern take-home using
+Cloudflare Pages, Workers and D1, with Pipecat running locally.
 
-- Frontend: https://vaaami-project.pages.dev
-- Call API: https://vaami-call-log-api-production.mehraaditya777.workers.dev
-- Deployment runs: https://github.com/gamea333/vaaami_project/actions
+[**Live application**](https://vaaami-project.pages.dev) ·
+[**Call history**](https://vaaami-project.pages.dev/#/calls) ·
+[**Deployment runs**](https://github.com/gamea333/vaaami_project/actions) ·
+[**API health**](https://vaami-call-log-api-production.mehraaditya777.workers.dev/health)
 
-The bot and its HTTPS tunnel must be running to make calls. Reading saved history
-only needs Pages and the Worker. Local and production D1 contain separate records.
+> **Demo availability:** saved history is hosted on Cloudflare. Voice calls also
+> require the local bot and its HTTPS tunnel to be running. Obtain the demo access
+> code from the project owner; provider API keys are never entered in the browser.
+
+## What the application does
+
+- Starts a microphone conversation with streaming speech recognition, LLM replies and synthesized speech.
+- Supports interruptions through Pipecat and records interruption labels in transcripts.
+- Stops calls at configured time, inactivity and usage limits.
+- Saves connected calls with metadata, user/assistant turns and available latency samples.
+- Provides paginated history and refreshable detail URLs, including save recovery and error states.
+- Deploys database migrations, the Worker and Pages through GitHub Actions.
 
 ## Architecture
 
-```text
-Browser (React / Pages)
-  |-- GET /calls, /calls/:id --> Worker --> D1
-  |-- authenticated HTTPS signaling --> tunnel --> local FastAPI bot
-  `-- WebRTC audio <--------------------------------------> Pipecat
-                                                Deepgram STT
-                                                Groq LLM
-                                                Cartesia TTS
-                                                     |
-                          finalized transcript/metrics --POST /calls--> Worker
+The frontend is hosted on Cloudflare, while the voice pipeline runs on the demo
+machine. The Worker handles stored call data; it does not run the speech pipeline.
+
+```mermaid
+flowchart TB
+    subgraph browser[Browser]
+        UI[React application]
+    end
+
+    subgraph cloud[Cloudflare]
+        Pages[Pages - static frontend]
+        Worker[Worker - call API]
+        DB[(D1 - call records)]
+        Tunnel[HTTPS tunnel endpoint]
+    end
+
+    subgraph local[Local demo machine]
+        API[FastAPI - session control]
+        Bot[Pipecat - voice pipeline]
+        Save[Finalize and verify save]
+    end
+
+    subgraph providers[Voice and language providers]
+        STT[Deepgram - speech to text]
+        LLM[Groq - text generation]
+        TTS[Cartesia - text to speech]
+    end
+
+    Pages -->|Serves HTML, CSS and JavaScript| UI
+    UI -->|Read history and details| Worker
+    Worker <-->|SQL reads and writes| DB
+    UI -->|Authenticated session requests| Tunnel
+    Tunnel -->|HTTP signaling| API
+    API -->|Owns call lifecycle| Bot
+    UI <-->|WebRTC audio and data| Bot
+    Bot -->|Microphone audio| STT
+    STT -->|Recognized text| Bot
+    Bot -->|Conversation context| LLM
+    LLM -->|Response text| Bot
+    Bot -->|Text to speak| TTS
+    TTS -->|Generated audio| Bot
+    Bot -->|Call ends| Save
+    Save -->|Authenticated POST and read-back| Worker
 ```
 
-D1 is the only persistent database. The local bot retains active sessions and
-unfinished saves in memory. No raw audio is recorded. Uploads use a private Bearer
-token; the demo code authorizes starting a call, and a separate random per-session
-token protects its controls. The UI marks a call saved only after read-back verification.
+**Three separate paths make this work:**
 
-## Prerequisites
+1. **Session control:** the browser sends authenticated HTTPS requests through the
+   tunnel to create, negotiate and end a local bot session.
+2. **Live conversation:** WebRTC connects the browser and Pipecat. Pipecat streams
+   audio to Deepgram, passes recognized text and context to Groq, and sends generated
+   text to Cartesia. Audio returns to the browser through WebRTC.
+3. **Persistence:** the bot freezes the finished call, uploads it to the Worker,
+   and verifies the stored result. The browser reads history directly from the Worker.
 
-Node.js 22.12+ (CI uses Node 22), Python 3.12, uv, Git, and provider accounts.
-On Windows, run the bot under Ubuntu WSL2. A microphone and headphones are useful.
-For deployment: Cloudflare, GitHub CLI, Wrangler (installed with npm), cloudflared.
+The tunnel carries HTTP signaling, **not WebRTC audio**. Optional STUN discovers
+public network candidates. Restrictive networks may require TURN; TURN is not
+configured. D1 is the only persistent application database. Raw audio is not stored.
 
-## Local setup
+### What happens when a call ends
 
-1. Run `npm ci` in the repository root.
-2. Copy `bot/.env.example` to `bot/.env`, `apps/api/.dev.vars.example` to
-   `apps/api/.dev.vars`, and `apps/web/.env.example` to `apps/web/.env`.
-3. In bot/.env enter DEEPGRAM_API_KEY, GROQ_API_KEY, CARTESIA_API_KEY,
-   CARTESIA_VOICE_ID, and a private DEMO_ACCESS_CODE.
-4. Generate a strong random CALLS_INGEST_TOKEN in apps/api/.dev.vars. Run
-   `npm run configure:bot --workspace=@vaami/api` to synchronize it and the local
-   Worker URL with the bot and frontend. On Windows this finds the WSL adapter.
-5. Apply the local schema: `npm run db:migrate --workspace=@vaami/api`.
-6. Install bot dependencies:
-
-```powershell
-wsl -d Ubuntu --cd /mnt/c/Dev/vaami_ai/bot -- .venv/bin/uv sync --locked
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as Browser
+    participant Bot as Local bot
+    participant API as Worker
+    participant DB as D1
+    User->>UI: Press End Call
+    UI->>UI: Stop microphone and playback immediately
+    UI->>Bot: POST session end
+    Bot->>Bot: Record stop reason and clean up pipeline
+    Bot->>Bot: Freeze transcript, timing and metrics
+    Bot-->>UI: Ended / save status
+    UI->>UI: Finish WebRTC cleanup
+    Bot->>API: POST /calls with ingestion token
+    API->>DB: Atomically save call and child records
+    DB-->>API: Commit
+    API-->>Bot: Saved or identical duplicate
+    Bot->>API: GET /calls/:id
+    API-->>Bot: Stored call detail
+    Bot->>Bot: Compare with frozen payload
+    UI->>Bot: Poll save status
+    Bot-->>UI: Saved and verified
+    User->>UI: Open History
+    UI->>API: GET /calls
+    API-->>UI: Saved call summaries
 ```
 
-For a fresh checkout without an existing .venv/uv, install uv first and run
-`uv sync --locked` inside the bot directory under Linux/WSL.
+Upload and UI status requests can overlap. End Call acknowledges the intentional
+hangup before browser transport cleanup, avoiding the previous disconnect-label
+race. If the end request fails, transport cleanup still runs and the UI reports
+unconfirmed cleanup rather than promising a successful hangup.
 
-Run each service in a separate terminal:
+## Technology choices
 
-```powershell
-npm run dev:api
-npm run dev:web
-wsl -d Ubuntu --cd /mnt/c/Dev/vaami_ai/bot -- .venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 7860
-```
-
-Open http://127.0.0.1:5173. Enter the demo code, optionally remember it on your own
-device, start a short call, end it, wait for verified saving, then open History.
-Use only one bot process, without --reload. Do not start duplicate servers on an
-occupied port. Restart a service after changing its environment settings.
-
-Optional invented local data: `npm run demo:seed --workspace=@vaami/api`.
-
-## Configuration
-
-| Location | Values | Visibility |
+| Layer | Technology | Responsibility |
 | --- | --- | --- |
-| bot/.env | Provider keys, voice/model IDs, demo code, ingestion token, API URL, allowed origins, limits, optional STUN_SERVER_URL | Private local file |
-| apps/api/.dev.vars | Local ingestion token and local API address | Private local file |
-| Worker secret | CALLS_INGEST_TOKEN | Cloudflare secret |
-| apps/web/.env | VITE_API_BASE_URL, VITE_BOT_BASE_URL, optional VITE_STUN_URL | Public build-time configuration |
-| GitHub Actions secret | CLOUDFLAREAPI | Cloudflare deployment token |
-| GitHub Actions variables | VITE_API_BASE_URL, VITE_BOT_BASE_URL, PAGES_URL | Public deployment URLs |
+| Frontend | React, TypeScript, Vite | Call controls, transcripts, history and detail screens |
+| Hosting | Cloudflare Pages | Serves the built frontend |
+| API | Cloudflare Workers, TypeScript | Validation, authenticated ingestion, reads and request logs |
+| Database | Cloudflare D1 | Calls, ordered transcript turns and latency samples |
+| Bot server | Python 3.12, FastAPI, Pipecat | Session lifecycle and streaming voice pipeline |
+| Transport | Pipecat SmallWebRTC | Browser audio; no Daily account required |
+| Speech recognition | Deepgram, default `nova-3` | Streaming speech-to-text |
+| Language model | Groq, default `openai/gpt-oss-20b` | Contextual replies |
+| Speech synthesis | Cartesia, default `sonic-3.6` | Streaming text-to-speech with a configured voice ID |
+| Deployment | Wrangler, GitHub Actions | Migrations, checks and cloud deployment |
 
-Never put private credentials in VITE variables. Optional remembered demo access
-uses this browser's localStorage, scoped by frontend origin and bot URL; it is not
-an encrypted vault. Use Forget saved code to clear it.
+Versions are locked in `package-lock.json` and `bot/uv.lock`. Models and the voice
+ID are configurable through the bot environment.
 
-## Deployment and GitHub Actions
+## Assessment requirements and verification
 
-`.github/workflows/deploy.yml` runs on pushes to main, pull requests and manual
-workflow dispatch. Checks install locked dependencies, typecheck, test the
-frontend and Worker, build the frontend, and run offline bot tests. Only main
-can deploy. Deployments are serialized and are not canceled mid-migration.
+| Requirement | Implementation and evidence |
+| --- | --- |
+| Pages frontend, Worker API, D1 only | Deployed to Cloudflare; production persistence verified |
+| Wrangler and migrations | Local development plus a separate production D1 binding |
+| GitHub Actions on pushes to main | Successful check, migration, Worker and Pages deployment runs |
+| Local Pipecat with required providers | Deepgram + Groq + Cartesia + SmallWebRTC |
+| Browser conversation | Live-site voice and saving confirmed by the project owner |
+| Handle interruptions | Implemented; transcript handling tested offline; spoken interruption acceptance pending |
+| Call ID, start/end, duration and transcript | Stored; a real production call has both user and assistant turns |
+| Optional latency per stage | Real production samples captured for STT, LLM and TTS |
+| Start Call, list and detail pages | Implemented, with pagination and hash routes |
+| POST /calls, GET /calls, GET /calls/:id | Implemented and covered by Worker tests |
+| Observability | Enabled; structured live Worker logs verified |
+| Repository and README | Source, workflow, architecture, setup, tradeoffs and improvements included |
 
-Deployment order: validate settings -> production D1 migrations -> Worker ->
-frontend build -> Pages Direct Upload -> read-only API/D1/CORS/Pages smoke tests.
-Speech providers are never called by CI. A Pages failure can leave the already
-deployed Worker updated: this is an ordered workflow, not an atomic cross-service
-transaction. Keep migrations backward-compatible.
+**Remaining acceptance checks:** a real spoken interruption; a fresh call confirming
+Completed after the deployed hangup fix; denied microphone and unavailable-bot UI;
+manual detail refresh/Back navigation; mobile-width layout; and dashboard log rehearsal.
+These are not claimed complete by automated tests.
 
-The `production` environment in apps/api/wrangler.jsonc has its own D1 binding,
-Worker name, Pages origin and observability. Top-level configuration is local.
+## Run locally
 
-One-time setup for another account:
+### Prerequisites
 
-1. Run `npx wrangler login`, create a D1 database, and update the production
-   account ID and database ID in wrangler.jsonc and the workflow.
-2. Create a Pages Direct Upload project; update the workflow project name and
-   allowed origin if using a different name.
-3. Provision the matching bot ingestion secret without committing it:
-   `npx wrangler secret put CALLS_INGEST_TOKEN --env production --config apps/api/wrangler.jsonc`.
-4. Add GitHub secret CLOUDFLAREAPI, scoped to the target account with Workers
-   Scripts Edit, D1 Edit, Cloudflare Pages Edit, and Account Settings Read.
-5. Add the three public URL variables in the table above and push to main.
+- Node.js 22.12 or newer; CI uses Node 22.
+- Python 3.12 and uv in Linux/Ubuntu WSL2 for the bot.
+- Git, provider credentials and a microphone. Headphones reduce feedback.
+- Cloudflare authentication is needed for deployment, not local D1 development.
 
-To point the local bot at production:
+Commands below use PowerShell for the frontend/API. The bot runs in Ubuntu WSL2.
+Adjust the WSL path if your checkout is elsewhere. Linux users can run the bot
+commands directly from its directory.
+
+### 1. Install dependencies and create local configuration
+
+```powershell
+git clone https://github.com/gamea333/vaaami_project.git
+cd vaaami_project
+npm ci
+Copy-Item bot/.env.example bot/.env
+Copy-Item apps/api/.dev.vars.example apps/api/.dev.vars
+Copy-Item apps/web/.env.example apps/web/.env
+```
+
+Copy the templates only on first setup; preserve existing configured files.
+
+In `bot/.env`, set `DEEPGRAM_API_KEY`, `GROQ_API_KEY`, `CARTESIA_API_KEY`,
+`CARTESIA_VOICE_ID`, and a private `DEMO_ACCESS_CODE`. In `apps/api/.dev.vars`, set
+`CALLS_INGEST_TOKEN` to a strong random value. For example, generate a value locally
+with `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`.
+Keep the result private.
+
+```powershell
+npm run configure:bot --workspace=@vaami/api
+npm run db:migrate --workspace=@vaami/api
+```
+
+The helper synchronizes the ingestion token and public local API URL without
+printing credentials. On Windows it finds the Windows WSL adapter because Linux
+localhost does not necessarily reach the Windows Worker.
+
+In an Ubuntu terminal, with uv already installed:
+
+```bash
+cd /mnt/c/path/to/vaaami_project/bot
+uv sync --locked --python 3.12
+```
+
+### 2. Start three services
+
+| Terminal | Working directory | Command |
+| --- | --- | --- |
+| PowerShell: API | Repository root | `npm run dev:api` |
+| PowerShell: frontend | Repository root | `npm run dev:web` |
+| Ubuntu: bot | `bot/` | `uv run python -m uvicorn server:app --host 127.0.0.1 --port 7860` |
+
+Open [localhost frontend](http://127.0.0.1:5173), enter the demo code, allow the
+microphone and start a short call. End it, wait for **Saved and verified**, and
+open History. Optional sample data: `npm run demo:seed --workspace=@vaami/api`.
+
+Use one bot process without `--reload`. Restart after environment changes only
+after resolving unfinished saves. Local D1 data and production D1 data are separate.
+Additional bot details are in [bot/README.md](bot/README.md).
+
+## Configuration and credentials
+
+| Location | Settings | Exposure |
+| --- | --- | --- |
+| `bot/.env` | Provider keys, models/voice ID, demo code, ingestion token, API URL, origins and limits | Private, ignored by Git |
+| `apps/api/.dev.vars` | Local ingestion token and local Worker address | Private, ignored by Git |
+| Worker secret | `CALLS_INGEST_TOKEN` | Cloudflare secret; must match the bot |
+| `apps/web/.env` | `VITE_API_BASE_URL`, `VITE_BOT_BASE_URL`, optional `VITE_STUN_URL` | Public values embedded at build time |
+| GitHub Actions secret | `CLOUDFLAREAPI` | Deployment token, mapped to `CLOUDFLARE_API_TOKEN` by the workflow |
+| GitHub Actions variables | `VITE_API_BASE_URL`, `VITE_BOT_BASE_URL`, `PAGES_URL` | Public deployment addresses |
+
+The demo code allows new calls; random per-session tokens protect session controls.
+The ingestion token allows uploads to the Worker. These are different from provider
+keys. Never put private keys in `VITE_` variables. Remember on this device stores the
+demo code in browser localStorage; use it only on your own device and clear it with
+Forget saved code.
+
+## API and data model
+
+| Endpoint | Purpose | Access |
+| --- | --- | --- |
+| `POST /calls` | Validate and save one finalized call | Bearer ingestion token |
+| `GET /calls?limit=20&offset=0` | Newest-first paginated summaries | Public demo read |
+| `GET /calls/:id` | Metadata, ordered turns and measured metrics | Public demo read |
+| `GET /health` | Service liveness | Public |
+
+| D1 table | Contents |
+| --- | --- |
+| `calls` | ID, start/end timestamps, duration, status, end reason and creation time |
+| `transcripts` | Call association, sequence, speaker, text, timestamp and interrupted flag |
+| `call_metrics` | Call association, sequence, optional turn association, stage, metric, milliseconds, provider and source |
+
+See [the SQL migration](apps/api/migrations/0001_init.sql) and
+[example upload payload](packages/contracts/call.example.json) for exact fields.
+Queries are parameterized and inserts are atomic. Retrying the same ID and payload
+is idempotent; changing content under the same ID returns 409.
+
+Completed means a normal recorded stop, including configured limits. Disconnected
+means the browser-disconnection reason was recorded. Failed means a bot error was
+recorded. These describe how a call ended, separately from whether its upload succeeded.
+
+Metrics are individual samples in milliseconds. Missing measurements display
+**Not captured**; overlapping measurements are not summed into an invented total.
+Interrupted transcript text may contain generated words that did not play aloud.
+
+## Deployment and CI/CD
+
+The [workflow](.github/workflows/deploy.yml) runs checks on pushes to `main`, pull
+requests and manual dispatch. Only `main` deploys production.
+
+```mermaid
+flowchart LR
+    Push[Push to main] --> Checks[Locked installs, typecheck, tests and build]
+    Checks --> Config[Validate deployment settings]
+    Config --> SQL[Apply production D1 migrations]
+    SQL --> API[Deploy Worker]
+    API --> Build[Build frontend with public URLs]
+    Build --> Pages[Deploy Pages]
+    Pages --> Smoke[Check API, D1, CORS and frontend]
+```
+
+Actions are pinned to commits. Production deploy jobs are serialized and are not
+canceled midway. A failed check blocks deployment. Cloud operations are sequential,
+not a single atomic transaction; migrations should remain backward-compatible.
+CI never starts a voice call or spends speech-provider credits.
+
+### Provisioning another account
+
+1. Run `npx wrangler login` and create a D1 database with Wrangler. Update the
+   account ID and production database ID in [wrangler.jsonc](apps/api/wrangler.jsonc).
+   Update the workflow's account ID too.
+2. Create a Pages Direct Upload project. Update its name in the workflow and its
+   origin in the production Worker configuration if different from this deployment.
+3. Set the Worker ingestion secret interactively:
+
+   ```powershell
+   npx wrangler secret put CALLS_INGEST_TOKEN --env production --config apps/api/wrangler.jsonc
+   ```
+
+4. Add GitHub secret `CLOUDFLAREAPI` with target-account permissions for Workers
+   Scripts Edit, D1 Edit, Cloudflare Pages Edit and Account Settings Read.
+5. Add the three public URL variables listed above. Push to `main` and inspect Actions.
+
+The top-level Wrangler configuration is for local development; the explicit
+`production` environment selects the production Worker, database and allowed origin.
+
+### Connect the local bot to the live site
+
+From the repository root:
 
 ```powershell
 node scripts/configure-production.mjs https://vaami-call-log-api-production.mehraaditya777.workers.dev https://vaaami-project.pages.dev
 ```
 
-This preserves provider keys and changes the call upload URL, allowed frontend
-origin and STUN setting. Confirm no unfinished save before restarting the bot.
-The production Worker must hold the same CALLS_INGEST_TOKEN as this bot.
-The local configure:bot command switches the upload URL back to local development.
+This updates the bot's upload URL, allowed Pages origin and public STUN setting,
+while preserving provider keys. Ensure its ingestion token matches the Worker,
+then restart the bot after resolving pending saves.
 
-## Local bot HTTPS tunnel
-
-Run cloudflared in a separate terminal:
+Run cloudflared in another terminal:
 
 ```powershell
 cloudflared tunnel --url http://127.0.0.1:7860 --no-autoupdate
 ```
 
-If using the downloaded local executable on this machine, replace `cloudflared`
-with `.\.tools\cloudflared.exe`. The generated https://...trycloudflare.com URL
-is temporary. Update GitHub variable VITE_BOT_BASE_URL when it changes, then use
-Actions -> Check and deploy -> Run workflow on main to rebuild Pages. Keep both
-bot and tunnel running throughout the demo. A named tunnel/domain is a future
-option for a stable address.
+On the original demo machine, the executable is also available as
+`.\.tools\cloudflared.exe`. Quick Tunnel URLs are temporary. When the URL changes,
+update GitHub variable `VITE_BOT_BASE_URL`, then run **Actions → Check and deploy →
+Run workflow** on `main`. Vite requires a rebuild to embed the new URL.
 
-The tunnel transports HTTP signaling, not WebRTC media. Optional STUN discovers
-public candidates and is enabled for the deployed demo. Restrictive NAT/firewalls
-or remote networks may require TURN, which is not configured. An HTTPS health
-check does not prove audible WebRTC connectivity; test on the actual demo machine.
+Keep the bot and tunnel alive throughout the demo. STUN is enabled for the deployed
+frontend and bot, but it does not guarantee connectivity across every NAT/firewall.
+Running `configure:bot` again switches upload settings back to local development.
 
-## API and storage
+## Observability and demo script
 
-- POST /calls: authenticated validated upload; same ID/content is idempotent,
-  changed content returns 409.
-- GET /calls?limit=20&offset=0: newest-first paginated summaries.
-- GET /calls/:id: metadata, ordered transcript and captured metrics.
-- GET /health: service liveness. The deployment smoke test also reads D1.
+In Cloudflare, open **Workers & Pages → vaami-call-log-api-production → Observability**.
+Application logs include request ID, call ID where applicable, route, status and
+elapsed milliseconds. They omit credentials and transcript text. Failed API requests
+include structured error codes. `X-Request-ID` is also returned to the client.
+Cloudflare provides platform request/error metrics alongside these logs.
 
-Tables: calls, transcripts, call_metrics. Parameterized queries and atomic batch
-writes prevent injection and partial saves. UTC timestamps are displayed in the
-viewer's local timezone. Metrics are milliseconds; missing data is Not captured.
-Overlapping samples are not summed into invented end-to-end latency.
+CLI alternative:
 
-History reads are public demo endpoints. CORS is browser policy, not user
-ownership/authentication. Do not use this prototype for confidential conversations.
+```powershell
+npx wrangler tail --env production --config apps/api/wrangler.jsonc
+```
 
-## Observability
+For the assessment:
 
-Cloudflare -> Workers & Pages -> vaami-call-log-api-production -> Observability.
-Generate a list/detail request and inspect structured logs. Logs include request
-ID, call ID where applicable, route, status and elapsed milliseconds. They omit
-credentials and transcripts. X-Request-ID is returned in API responses.
-CLI alternative: `npx wrangler tail --env production --config apps/api/wrangler.jsonc`.
+1. Start the bot and tunnel; verify the deployed frontend points to the current tunnel.
+2. Open the live site, make a short call and ask a follow-up question.
+3. Interrupt an answer and demonstrate the change in response.
+4. End the call, wait for verified saving and open it from History.
+5. Show its transcript, interruption labels, duration and measured/missing latency.
+6. Locate that call ID in Cloudflare logs and show a successful GitHub Actions run.
+7. Explain the architecture and make a small code change, such as changing the greeting.
 
-## Tests
+## Tests and failure handling
 
 ```powershell
 npm run typecheck
 npm run build
 npm run test --workspace=@vaami/web
 npm run test --workspace=@vaami/api
-wsl -d Ubuntu --cd /mnt/c/Dev/vaami_ai/bot -- .venv/bin/python -m pytest -q
 ```
 
-Tests use fake providers. `bot/smoke_persistence.py` additionally writes a clearly
-labeled synthetic call to the configured Worker, intentionally loses its first
-success acknowledgement and verifies an idempotent retry. It uses no speech credits.
-Production smoke checks in scripts/smoke-deployment.mjs are read-only.
+From `bot/` in Ubuntu:
 
-Local browser voice/text and saved-call history were user-confirmed. Deployment
-HTTP checks and a green workflow do not replace a real live-URL microphone,
-interruption, save and detail-refresh acceptance check.
+```bash
+uv run python -m pytest -q
+```
 
-## Decisions, limits and improvements
+Current automated suite: **20 frontend, 13 Worker and 32 bot tests**. Coverage includes
+history loading/retry/404 states, stale requests, audio cleanup, intentional-hangup
+ordering, usage limits, upload validation, duplicate/conflicting saves and lost-response
+retries. Tests use fake providers; passing tests do not prove real audio or visual layout.
 
-SmallWebRTC avoids a paid transport account. Groq handles text generation; Cartesia
-handles speech. A local bot matches the assignment but limits availability and
-network reachability. Hash routing keeps static Pages refreshes simple. A shared
-demo access code and single active session keep this a bounded demo.
+`bot/smoke_persistence.py` writes a labeled synthetic call to the configured API and
+verifies retry/read-back without speech providers. CI's deployment smoke test only reads.
 
-Defaults: 120 seconds/call, 30 seconds idle, eight LLM requests, 512 completion
-tokens/reply and 1200 reserved TTS characters/call. Attempts reserve 120 seconds
-from a 600-second run budget. Restarting the process resets that budget. These
+| Symptom | Check |
+| --- | --- |
+| 401 when starting | Demo code and restarted bot settings |
+| 503 from bot | Missing provider/configuration fields reported by health |
+| 429 from bot | Process usage budget; inspect provider usage before restarting |
+| Microphone unavailable | Browser permissions, input device and secure context |
+| Live page loads, bot unavailable | Bot process, tunnel process and current frontend tunnel URL |
+| Signaling succeeds, audio silent | Playback permissions, ICE, WSL networking and firewall/NAT |
+| Save failed or unconfirmed | Worker URL/token and network; retry/recover before restarting the bot |
+| Old local calls absent online | Local and production D1 intentionally use separate storage |
+
+## Decisions, tradeoffs and improvements
+
+| Decision | Why | Tradeoff |
+| --- | --- | --- |
+| Local Pipecat | Matches the assignment and keeps provider keys server-side | Demo depends on the machine and network |
+| SmallWebRTC | Supported transport without a Daily account | ICE/NAT connectivity must be handled explicitly |
+| D1 with atomic, idempotent uploads | Simple schema and safe retry after lost responses | Unsaved bot data is still in memory |
+| Hash routing | Static Pages URLs survive refresh without server routes | URLs include a fragment |
+| One call and a shared demo code | Keeps the demo bounded and protects provider access | Not a multi-user authentication system |
+| Temporary tunnel | HTTPS access without a custom domain | Address changes require a frontend rebuild |
+
+Default limits: 120 seconds per call, 30 seconds idle, eight LLM requests, 512
+completion tokens per reply and 1200 reserved TTS characters per call. Each attempt
+reserves 120 seconds from a 600-second process budget. Restarting resets that budget;
 limits do not measure or guarantee provider account balances.
 
-Save retries are bounded; failed payloads remain in memory and can be recovered
-from the frontend before restarting. A process crash can lose unsaved data.
-Other limits: public history, temporary tunnel URL, no TURN, no raw audio archive,
-SDK bundle-size warning, and optional latency availability.
+Known limitations: public history reads, no TURN relay, no raw audio recording,
+unsaved-call loss after a bot crash, temporary tunnel availability, an SDK bundle-size
+warning and the pending manual checks listed above. CORS is not user authentication.
 
-Improvements: durable save outbox, per-user access control, retention/deletion,
-stable bot hosting/TURN, stronger shared rate limits, and bundle splitting.
+Next improvements, in priority order:
 
-## Code map
+1. Durable save recovery so a bot crash cannot lose a finished conversation.
+2. User-scoped history, retention and deletion controls.
+3. Stable bot hosting/tunnel and TURN for broader network compatibility.
+4. Persistent shared usage limits, richer latency tracing and frontend bundle splitting.
 
-- apps/web/src/App.tsx: navigation and live call controls.
-- apps/web/src/History.tsx: list/detail loading, errors, transcript and metrics.
-- apps/web/src/lib/voice.ts: signaling, audio playback, cleanup and save recovery.
-- apps/api/src/index.ts: routes, auth, CORS and structured logging.
-- apps/api/src/validation.ts and db.ts: contract checks and D1 queries.
-- bot/server.py and session.py: session control and lifecycle.
-- bot/pipeline.py and guards.py: voice pipeline and credit limits.
-- bot/persistence.py and api_client.py: frozen payload, bounded retry/read-back.
-- .github/workflows/deploy.yml: checks and production deployment sequence.
+## Repository guide
+
+| Path | Responsibility |
+| --- | --- |
+| [apps/web/src/App.tsx](apps/web/src/App.tsx) | Navigation, call controls and save status |
+| [apps/web/src/History.tsx](apps/web/src/History.tsx) | History and conversation details |
+| [apps/web/src/lib/voice.ts](apps/web/src/lib/voice.ts) | Browser signaling, audio and cleanup |
+| [apps/api/src/index.ts](apps/api/src/index.ts) | Routes, authentication, CORS and logs |
+| [apps/api/src/validation.ts](apps/api/src/validation.ts) | Runtime upload contract |
+| [apps/api/src/db.ts](apps/api/src/db.ts) | D1 queries and idempotency |
+| [bot/server.py](bot/server.py), [bot/session.py](bot/session.py) | Session HTTP API and lifecycle |
+| [bot/pipeline.py](bot/pipeline.py), [bot/guards.py](bot/guards.py) | Voice pipeline, transcripts and budgets |
+| [bot/persistence.py](bot/persistence.py), [bot/api_client.py](bot/api_client.py) | Frozen payloads, retries and read-back |
+| [.github/workflows/deploy.yml](.github/workflows/deploy.yml) | Checks and production deployment |
 
 Personal phase notes and the assignment PDF are intentionally excluded from Git.
-All instructions needed to run the submitted project are in this README and bot/README.md.
+This README and the bot README contain the submitted setup and architecture documentation.
