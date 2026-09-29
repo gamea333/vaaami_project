@@ -1,0 +1,5 @@
+# Backend-only credential. Generate your own value; never put it in VITE_ variables.
+CALLS_INGEST_TOKEN=
+
+# configure:bot updates this to the Windows WSL adapter when needed.
+LOCAL_API_BASE_URL=http://127.0.0.1:8787

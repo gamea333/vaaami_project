@@ -1,0 +1,35 @@
+{
+  "id": "4bfa6c22-5c9d-41e1-a1b3-76a8ebc9a613",
+  "startedAt": "2026-09-28T12:00:00.000Z",
+  "endedAt": "2026-09-28T12:00:20.000Z",
+  "durationMs": 20000,
+  "status": "completed",
+  "endReason": "user_hangup",
+  "transcripts": [
+    {
+      "sequence": 0,
+      "role": "user",
+      "text": "Hello",
+      "timestamp": "2026-09-28T12:00:02.000Z",
+      "interrupted": false
+    },
+    {
+      "sequence": 1,
+      "role": "assistant",
+      "text": "Hi! How can I help?",
+      "timestamp": "2026-09-28T12:00:03.000Z",
+      "interrupted": false
+    }
+  ],
+  "metrics": [
+    {
+      "sequence": 0,
+      "turnSequence": 1,
+      "stage": "llm",
+      "metricName": "ttfb",
+      "valueMs": 150,
+      "provider": "groq",
+      "measurementSource": "pipecat.TTFBMetricsData"
+    }
+  ]
+}

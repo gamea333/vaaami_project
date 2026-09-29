@@ -1,0 +1,41 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "vaami-call-log-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-28",
+  "vars": {
+    "ALLOWED_ORIGINS": "http://127.0.0.1:5173,http://localhost:5173"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vaami-calls",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "account_id": "705ce23d60bf9c37fa0cdee045193fb9",
+  "env": {
+    "production": {
+      "name": "vaami-call-log-api-production",
+      "workers_dev": true,
+      "vars": {
+        "ALLOWED_ORIGINS": "https://vaaami-project.pages.dev"
+      },
+      "observability": {
+        "enabled": true
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "vaami-calls-production",
+          "database_id": "9aa65495-73a4-4667-8777-c2889846b42d",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
+  }
+}

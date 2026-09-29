@@ -1,0 +1,65 @@
+name: Check and deploy
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test --workspace=@vaami/web
+      - run: npm run test --workspace=@vaami/api
+      - run: npm run build
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: bot/uv.lock
+      - run: uv sync --locked --project bot --python 3.12
+      - run: uv run --directory bot python -m pytest -q
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: production-deployment
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_ACCOUNT_ID: '705ce23d60bf9c37fa0cdee045193fb9'
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLAREAPI }}
+      VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+      VITE_BOT_BASE_URL: ${{ vars.VITE_BOT_BASE_URL }}
+      VITE_STUN_URL: stun:stun.cloudflare.com:3478
+      PAGES_URL: ${{ vars.PAGES_URL }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Validate deployment settings
+        run: node scripts/check-deploy-env.mjs
+      - name: Apply production D1 migrations
+        working-directory: apps/api
+        run: npx wrangler d1 migrations apply DB --remote --env production
+      - name: Deploy Worker
+        working-directory: apps/api
+        run: npx wrangler deploy --env production
+      - name: Build Pages
+        run: npm run build
+      - name: Deploy Pages
+        run: npx wrangler pages deploy apps/web/dist --project-name vaaami-project --branch main
+      - name: Check deployed API and frontend
+        run: node scripts/smoke-deployment.mjs

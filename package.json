@@ -1,0 +1,14 @@
+{
+  "name": "vaami-call-log",
+  "private": true,
+  "version": "0.0.0",
+  "workspaces": ["apps/web", "apps/api"],
+  "scripts": {
+    "dev:web": "npm run dev --workspace=@vaami/web",
+    "dev:api": "npm run dev --workspace=@vaami/api",
+    "typecheck": "npm run typecheck --workspaces",
+    "build": "npm run build --workspace=@vaami/web",
+    "check:worker": "npm run check --workspace=@vaami/api"
+  },
+  "engines": { "node": ">=22.12.0" }
+}
